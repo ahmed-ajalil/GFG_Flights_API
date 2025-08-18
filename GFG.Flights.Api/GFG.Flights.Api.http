@@ -1,0 +1,6 @@
+@GFG.Flights.Api_HostAddress = http://localhost:5137
+
+GET {{GFG.Flights.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
