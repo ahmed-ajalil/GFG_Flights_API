@@ -16,9 +16,11 @@ public class FlightsController : ControllerBase
         _cdd = cdd;
         _airport = airport;
     }
+    // Changed: accepts from/to date range and returns enriched structure
     [HttpGet("today")]
-    public async Task<ActionResult<IEnumerable<FlightDto>>> GetTodaysFlights(CancellationToken ct)
-        => Ok(await _cdd.GetTodaysFlightsAsync(ct));
+    public async Task<ActionResult<IEnumerable<FlightStatusDto>>> GetFlights([FromQuery] DateOnly from, [FromQuery] DateOnly to, CancellationToken ct)
+        => Ok(await _cdd.GetFlightsAsync(from, to, ct));
+
     [HttpGet("{flightNumber}/{date}/booked")]
     public async Task<ActionResult<IEnumerable<PassengerDto>>> GetBooked(
         string flightNumber, 

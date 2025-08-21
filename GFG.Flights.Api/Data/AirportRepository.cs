@@ -27,7 +27,7 @@ WHERE TRIM(a.ALN_CD) = 'GF'
   AND TRIM(a.FLT_NR)  = :fltNr
   AND TRUNC(NVL(a.PUB_DEP_DT, a.SCH_DEP_DT)) = :flightDate
   AND UPPER(TRIM(a.STATUS)) IN ('CKIN') 
-  AND BOARDED = FALSE
+  AND BOARDED = 'FALSE'
 ORDER BY a.PAX_NAME";
 
         var args = new
