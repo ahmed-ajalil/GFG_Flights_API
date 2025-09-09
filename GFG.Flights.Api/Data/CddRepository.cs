@@ -44,7 +44,8 @@ SELECT
   TRIM(t.PNR_LOCATOR)     AS Pnr,
   TRIM(t.PASSENGER_NAME)  AS FullName,
   TRIM(t.CLASS_OF_SERVICE) AS ClassOfService,
-  TRIM(t.TICKET_NUMBER)    AS TicketNumber
+  TRIM(t.TICKET_NUMBER)    AS TicketNumber,
+  t.PHONE_NUMBER  AS PhoneNumber
 FROM vw_pax_details t
 WHERE TRIM(t.FLIGHT_NUMBER) = :flightNumber
   AND TRUNC(t.SERVICE_START_DATE) = :flightDate
@@ -61,7 +62,7 @@ ORDER BY t.PASSENGER_NAME";
             var result = raw.Select(r =>
             {
                 var (given, surname) = SplitNameSurnameFirst(r.FullName);
-                return new PassengerDto(r.Pnr, given, surname, Seat: null);
+                return new PassengerDto(r.Pnr, given, surname, r.PhoneNumber);
             }).ToList();
 
             return result;
@@ -287,7 +288,7 @@ ORDER BY SchDepDate, FlightNumber";
             var given = string.Join(" ", parts.Skip(1));
             return (given, surname);
         }
-        private sealed record CddBookedRow(string Pnr, string FullName, string? ClassOfService, string? TicketNumber);
+        private sealed record CddBookedRow(string Pnr, string FullName, string? ClassOfService, string? TicketNumber, string? PhoneNumber);
         private sealed record CddFlightRow(
             string AirlineCode,
             string FlightNumber,

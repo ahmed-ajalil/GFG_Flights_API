@@ -36,4 +36,16 @@ public class FlightsController : ControllerBase
        string flightNumber,
        DateOnly date, CancellationToken ct)
        => Ok(await _airport.GetBoardedPassengersAsync(flightNumber, date, ct));
+
+    [HttpGet("customer-details")]
+    public async Task<ActionResult<IEnumerable<CustomerFlightDetailDto>>> GetCustomerFlightDetails(
+        [FromQuery] string? name,
+        [FromQuery] DateOnly from,
+        [FromQuery] DateOnly to,
+        [FromQuery(Name = "document_number")] string? docNumber,
+        CancellationToken ct)
+    {
+        var result = await _airport.GetCustomerFlightDetailsAsync(name, from, to, docNumber, ct);
+        return Ok(result);
+    }
 }
