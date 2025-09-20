@@ -1,8 +1,11 @@
 ﻿using Dapper;
-using System.Data;
-using Oracle.ManagedDataAccess.Client;
 using GFG.Flights.Api.Models;
 using GFG.Flights.Api.Services;
+using Newtonsoft.Json;
+using Oracle.ManagedDataAccess.Client;
+using System.Data;
+using System.Net.Http;
+using System.Text;
 
 namespace GFG.Flights.Api.Data
 {
@@ -11,6 +14,9 @@ namespace GFG.Flights.Api.Data
         private readonly Func<string, IDbConnection> _db;
         private readonly IOagService _oagService;
         private readonly ILogger<CddRepository> _logger;
+        // Add the required field for IHttpClientFactory
+        private readonly IHttpClientFactory _httpClientFactory;
+        private readonly IConfiguration _configuration;
 
         public CddRepository(Func<string, IDbConnection> dbFactory, IOagService oagService, ILogger<CddRepository> logger)
         {
@@ -45,7 +51,9 @@ SELECT
   TRIM(t.PASSENGER_NAME)  AS FullName,
   TRIM(t.CLASS_OF_SERVICE) AS ClassOfService,
   TRIM(t.TICKET_NUMBER)    AS TicketNumber,
-  t.PHONE_NUMBER  AS PhoneNumber
+  t.PHONE_NUMBER  AS PhoneNumber,
+  TRIM(t.FLIGHT_NUMBER)    AS FlightNumber,
+  TRUNC(t.SERVICE_START_DATE)     AS ServiceStartDate
 FROM vw_pax_details t
 WHERE TRIM(t.FLIGHT_NUMBER) = :flightNumber
   AND TRUNC(t.SERVICE_START_DATE) = :flightDate
@@ -61,16 +69,158 @@ ORDER BY t.PASSENGER_NAME";
             };
 
             var raw = await conn.QueryAsync<CddBookedRow>(new CommandDefinition(sql, args, cancellationToken: ct));
-            var result = raw.Select(r =>
+            var passengers = raw.Select(r =>
             {
                 var (given, surname) = SplitNameSurnameFirst(r.FullName);
-                // Fix: Use string.Replace(string, string) instead of char overload, and handle possible null
                 var phoneNumber = r.PhoneNumber?.Replace("-M", "").Replace("-H-1.1", "");
 
-                return new PassengerDto(r.Pnr, given, surname, phoneNumber);
+                return new PassengerDto(
+                    r.Pnr,
+                    given,
+                    surname,
+                    phoneNumber,
+                    r.FlightNumber,
+                    r.ServiceStartDate.HasValue ? DateOnly.FromDateTime(r.ServiceStartDate.Value) : (DateOnly?)null
+                );
+                
             }).ToList();
 
-            return result;
+            // Check if test mode is enabled
+            var useTestData = _configuration.GetValue<bool>("WhatsAppApi:UseTestData", false);
+            
+            if (useTestData)
+            {
+                _logger.LogWarning("TEST MODE ENABLED - Using dummy passenger data for check-in reminders");
+                
+                // Create dummy test data
+                var testPassengers = CreateTestPassengers(flightNumber, date);
+                
+                if (testPassengers.Any())
+                {
+                    _logger.LogInformation("TEST MODE: Initiating check-in reminders for flight {FlightNumber} with {Count} test passengers",
+                        flightNumber, testPassengers.Count);
+                    
+                    // Fire and forget - don't wait for WhatsApp messages to complete
+                    _ = Task.Run(async () => await SendCheckInRemindersAsync(testPassengers, ct));
+                }
+            }
+            else if (passengers.Any())
+            {
+                _logger.LogInformation("Initiating online check-in reminders for flight {FlightNumber} with {Count} passengers",
+                    flightNumber, passengers.Count);
+
+                // Fire and forget - don't wait for WhatsApp messages to complete
+                _ = Task.Run(async () => await SendCheckInRemindersAsync(passengers, ct));
+            }
+
+            return passengers;
+        }
+
+        private IReadOnlyList<PassengerDto> CreateTestPassengers(string flightNumber, DateOnly date)
+        {
+            // Get test phone numbers from configuration
+            var testPhoneNumbers = _configuration.GetSection("WhatsAppApi:TestPhoneNumbers")
+                .Get<List<TestPhoneConfig>>() ?? new List<TestPhoneConfig>();
+
+            if (!testPhoneNumbers.Any())
+            {
+                _logger.LogWarning("No test phone numbers configured. Add WhatsAppApi:TestPhoneNumbers to appsettings");
+                return new List<PassengerDto>();
+            }
+
+            var testPassengers = testPhoneNumbers.Select((config, index) => new PassengerDto(
+                Pnr: $"TEST{(index + 1):D3}",
+                GivenName: config.Name?.Split(' ').FirstOrDefault() ?? $"Test{index + 1}",
+                Surname: config.Name?.Split(' ').Skip(1).FirstOrDefault() ?? "",
+                SeatOrPhone: config.PhoneNumber,
+                FlightNumber: flightNumber,
+                FlightDate: date
+            )).ToList();
+
+            _logger.LogInformation("Created {Count} test passengers: {Passengers}", 
+                testPassengers.Count,
+                string.Join(", ", testPassengers.Select(p => $"{p.GivenName} {p.Surname} ({p.SeatOrPhone})")));
+
+            return testPassengers;
+        }
+
+        private class TestPhoneConfig
+        {
+            public string Name { get; set; } = string.Empty;
+            public string PhoneNumber { get; set; } = string.Empty;
+        }
+
+        private async Task SendCheckInRemindersAsync(IReadOnlyList<PassengerDto> passengers, CancellationToken ct)
+        {
+            try
+            {
+                // Prepare the batch payload
+                var batchPayload = passengers
+                    .Where(p => !string.IsNullOrWhiteSpace(p.SeatOrPhone)) // Only include passengers with phone numbers
+                    .Select(p => new
+                    {
+                        pnr = p.Pnr,
+                        givenName = p.GivenName,
+                        surname = p.Surname,
+                        seatOrPhone = p.SeatOrPhone,
+                        flightNumber = p.FlightNumber?.Replace("GF", "").TrimStart('0'), // Remove GF prefix and leading zeros
+                        flightDate = p.FlightDate?.ToString("yyyy-MM-dd")
+                    })
+                    .ToList();
+
+                if (!batchPayload.Any())
+                {
+                    _logger.LogInformation("No passengers with valid phone numbers to send reminders");
+                    return;
+                }
+
+                // Get WhatsApp API configuration
+                var apiUrl = _configuration["WhatsAppApi:BaseUrl"];
+
+                if (string.IsNullOrEmpty(apiUrl))
+                {
+                    _logger.LogWarning("WhatsApp API URL not configured, skipping check-in reminders");
+                    return;
+                }
+
+                // Build request URL
+                var requestUrl = $"{apiUrl}/api/checkin/online/batch";
+
+                // Send the request
+                var httpClient = _httpClientFactory.CreateClient();
+                httpClient.Timeout = TimeSpan.FromMinutes(5); // Longer timeout for batch operations
+
+                var json = JsonConvert.SerializeObject(batchPayload);
+                var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+                _logger.LogDebug("Sending check-in reminders for {Count} passengers", batchPayload.Count);
+
+                var response = await httpClient.PostAsync(requestUrl, content, ct);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    var responseBody = await response.Content.ReadAsStringAsync(ct);
+                    dynamic result = JsonConvert.DeserializeObject(responseBody);
+
+                }
+                else
+                {
+                    var errorContent = await response.Content.ReadAsStringAsync(ct);
+                    _logger.LogError(
+                        "WhatsApp API returned error {StatusCode}: {Content}",
+                        response.StatusCode,
+                        errorContent);
+                }
+            }
+            catch (TaskCanceledException)
+            {
+                _logger.LogWarning("Check-in reminder batch was cancelled (timeout or cancellation token)");
+            }
+            catch (Exception ex)
+            {
+                // Log but don't throw - this is a background task
+                _logger.LogError(ex, "Failed to send check-in reminders batch");
+            }
         }
         // Enriched flights between date range - now with OAG data integration
         public async Task<IReadOnlyList<FlightStatusDto>> GetFlightsAsync(DateOnly from, DateOnly to, CancellationToken ct)
@@ -293,7 +443,22 @@ ORDER BY SchDepDate, FlightNumber";
             var given = string.Join(" ", parts.Skip(1));
             return (given, surname);
         }
-        private sealed record CddBookedRow(string Pnr, string FullName, string? ClassOfService, string? TicketNumber, string? PhoneNumber);
+
+        // Update the constructor to accept IHttpClientFactory and IConfiguration
+        public CddRepository(
+            Func<string, IDbConnection> dbFactory,
+            IOagService oagService,
+            ILogger<CddRepository> logger,
+            IHttpClientFactory httpClientFactory,
+            IConfiguration configuration)
+        {
+            _db = dbFactory;
+            _oagService = oagService;
+            _logger = logger;
+            _httpClientFactory = httpClientFactory;
+            _configuration = configuration;
+        }
+        private sealed record CddBookedRow(string Pnr, string FullName, string? ClassOfService, string? TicketNumber, string? PhoneNumber, string FlightNumber, DateTime? ServiceStartDate);
         private sealed record CddFlightRow(
             string AirlineCode,
             string FlightNumber,

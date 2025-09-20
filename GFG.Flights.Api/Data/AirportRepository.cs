@@ -42,7 +42,7 @@ ORDER BY a.PAX_NAME";
         var result = raw.Select(r =>
         {
             var (given, surname) = SplitNameSurnameLast(r.PaxName);
-            return new PassengerDto(r.Pnr, given, surname, r.Seat);
+            return new PassengerDto(r.Pnr, given, surname, r.Seat, null, null);
         }).ToList();
 
         return result;
@@ -79,7 +79,7 @@ ORDER BY a.PAX_NAME";
         var result = raw.Select(r =>
         {
             var (given, surname) = SplitNameSurnameLast(r.PaxName);
-            return new PassengerDto(r.Pnr, given, surname, r.Seat);
+            return new PassengerDto(r.Pnr, given, surname, r.Seat, null, null);
         }).ToList();
 
         return result;

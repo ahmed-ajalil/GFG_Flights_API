@@ -97,7 +97,7 @@ builder.Services.AddHttpClient<IOagService, OagService>(client =>
 builder.Services.AddScoped<ICddRepository, CddRepository>();
 builder.Services.AddScoped<IAirportRepository, AirportRepository>();
 builder.Services.AddScoped<AzureCommunicationService>();
-
+builder.Services.AddHttpClient();
 var app = builder.Build();
 
 // Log application startup information
