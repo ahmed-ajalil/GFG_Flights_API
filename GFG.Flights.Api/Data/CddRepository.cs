@@ -50,6 +50,8 @@ FROM vw_pax_details t
 WHERE TRIM(t.FLIGHT_NUMBER) = :flightNumber
   AND TRUNC(t.SERVICE_START_DATE) = :flightDate
   AND (t.PASSENGER_STATUS IS NULL OR UPPER(t.PASSENGER_STATUS) IN ('BOOKED','CONFIRMED'))
+  AND t.PHONE_NUMBER IS NOT NULL
+  AND t.coupon_status not in ('CKIN')
 ORDER BY t.PASSENGER_NAME";
 
             var args = new
@@ -62,7 +64,10 @@ ORDER BY t.PASSENGER_NAME";
             var result = raw.Select(r =>
             {
                 var (given, surname) = SplitNameSurnameFirst(r.FullName);
-                return new PassengerDto(r.Pnr, given, surname, r.PhoneNumber);
+                // Fix: Use string.Replace(string, string) instead of char overload, and handle possible null
+                var phoneNumber = r.PhoneNumber?.Replace("-M", "").Replace("-H-1.1", "");
+
+                return new PassengerDto(r.Pnr, given, surname, phoneNumber);
             }).ToList();
 
             return result;

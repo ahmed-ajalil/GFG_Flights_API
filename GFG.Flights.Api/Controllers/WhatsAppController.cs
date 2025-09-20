@@ -13,11 +13,13 @@ public class WhatsAppController : ControllerBase
 {
     private readonly AzureCommunicationService _svc;
     private readonly ILogger<WhatsAppController> _logger;
+    private readonly string? _unifiedTemplateName; // consolidated template name from config
 
-    public WhatsAppController(AzureCommunicationService svc, ILogger<WhatsAppController> logger)
+    public WhatsAppController(AzureCommunicationService svc, ILogger<WhatsAppController> logger, IConfiguration config)
     {
         _svc = svc;
         _logger = logger;
+        _unifiedTemplateName = config["AcsUnifiedTemplateName"]; // e.g. gfg_unified_flight_notification (body contains {{1}})
     }
 
     /// <summary>
@@ -106,6 +108,56 @@ public class WhatsAppController : ControllerBase
     }
 
     /// <summary>
+    /// Consolidated template endpoint. Uses a single approved template (configured via AcsUnifiedTemplateName) whose body contains a single placeholder {{1}}. 
+    /// The full dynamic message text is supplied by the client and injected as variable 1.
+    /// </summary>
+    /// <remarks>
+    /// 1. Create a WhatsApp template in Meta / ACS with a body like: "{{1}}" (or surrounding static greeting text if desired).
+    /// 2. Set configuration key AcsUnifiedTemplateName to that template's name.
+    /// 3. POST example:
+    /// {
+    ///   "phone": "+97300000000",
+    ///   "body": "Dear Passenger,\n\nCheck-in counters for your flight GF 001 from Bahrain (BAH) to New York (JFK) are now open from 01:00 AM to 03:00 PM..."
+    /// }
+    /// </remarks>
+    [HttpPost("unified")]
+    [SwaggerOperation(Summary = "Send unified dynamic template", Description = "Inject arbitrary body text into a single pre-approved template with one variable {{1}}.")]
+    [SwaggerResponse(200, "Message sent")] 
+    [SwaggerResponse(400, "Validation error / configuration missing")] 
+    [SwaggerResponse(500, "Internal error")]
+    public async Task<IActionResult> SendUnified([FromBody] UnifiedTemplateRequest request, CancellationToken ct)
+    {
+        var reqId = Guid.NewGuid().ToString("N")[..8];
+        if (!ModelState.IsValid) return ValidationProblem(ModelState);
+        if (string.IsNullOrWhiteSpace(_unifiedTemplateName))
+        {
+            return BadRequest(new { error = "AcsUnifiedTemplateName configuration missing", reqId });
+        }
+        try
+        {
+            var body = request.Body?.Trim();
+            if (string.IsNullOrWhiteSpace(body)) return BadRequest(new { error = "Body required", reqId });
+
+            // Single variable dictionary: key "1" maps to entire body.
+            var vars = new Dictionary<string,string> { ["1"] = body };
+            var maskedPhone = MaskPhone(request.Phone);
+            _logger.LogInformation("[{Req}] Sending unified template {Template} to {Phone} BodyLength={Len}", reqId, _unifiedTemplateName, maskedPhone, body.Length);
+            await _svc.SendTemplateMessageAsync(request.Phone!, _unifiedTemplateName!, request.Language ?? "en", vars, ct: ct);
+            return Ok(new { message = "Unified template sent", requestId = reqId });
+        }
+        catch (Azure.RequestFailedException rfe)
+        {
+            _logger.LogError(rfe, "[{Req}] ACS failure Status={Status} Code={Code} Msg={Msg}", reqId, rfe.Status, rfe.ErrorCode, rfe.Message);
+            return StatusCode(502, new { error = "ACS error", status = rfe.Status, code = rfe.ErrorCode, requestId = reqId });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[{Req}] Unexpected error", reqId);
+            return StatusCode(500, new { error = ex.Message, requestId = reqId });
+        }
+    }
+
+    /// <summary>
     /// Simple health check / diagnostics endpoint.
     /// </summary>
     [HttpGet("ping")]
@@ -127,4 +179,13 @@ public class SendTemplateRequest
     public string? Language { get; set; } = "en";
     public string[]? Variables { get; set; } // ordered list
     public Dictionary<string,string>? VariablesMap { get; set; } // keyed
+}
+
+public class UnifiedTemplateRequest
+{
+    [Required]
+    public string? Phone { get; set; }
+    [Required]
+    public string? Body { get; set; }
+    public string? Language { get; set; } = "en";
 }
